@@ -1,0 +1,244 @@
+# PYTHON BACKTESTING – TECHNICAL ANALYSIS STRATEGIES
+
+# COMMON IMPORTS AND SETTINGS
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import yfinance as yf
+import pandas as pd
+from backtesting import Backtest, Strategy
+from IPython.display import display
+
+TICKERS = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+START = "2021-01-01"
+END = "2026-09-30"
+CASH = 200_000
+
+
+# =====================================================
+# 1. MOVING AVERAGE (MA) BACKTESTING STRATEGY
+# =====================================================
+
+def SMA(close, n):
+    return pd.Series(close).rolling(n).mean()
+
+
+class MAStrategy(Strategy):
+
+    fast = 20
+    slow = 50
+    stop = 0.07
+
+    def init(self):
+        self.ma20 = self.I(SMA, self.data.Close, self.fast)
+        self.ma50 = self.I(SMA, self.data.Close, self.slow)
+
+    def next(self):
+
+        price = self.data.Close[-1]
+
+        if not self.position and self.ma20[-1] > self.ma50[-1]:
+            self.buy(sl=price * (1 - self.stop))
+
+        elif self.position and self.ma20[-1] < self.ma50[-1]:
+            self.position.close()
+
+
+# =====================================================
+# 2. MACD BACKTESTING STRATEGY
+# =====================================================
+
+def MACD(close):
+    close = pd.Series(close)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    return ema12 - ema26
+
+
+def MACD_Signal(close):
+    return MACD(close).ewm(span=9, adjust=False).mean()
+
+
+class MACDStrategy(Strategy):
+
+    stop = 0.07
+
+    def init(self):
+        self.macd = self.I(MACD, self.data.Close)
+        self.signal = self.I(MACD_Signal, self.data.Close)
+
+    def next(self):
+
+        price = self.data.Close[-1]
+
+        if not self.position and self.macd[-1] > self.signal[-1]:
+            self.buy(sl=price * (1 - self.stop))
+
+        elif self.position and self.macd[-1] < self.signal[-1]:
+            self.position.close()
+
+
+# =====================================================
+# 3. VOLUME BACKTESTING STRATEGY
+# =====================================================
+
+def Volume_Avg(volume, n=20):
+    return pd.Series(volume).rolling(n).mean().shift(1)
+
+
+class VolumeStrategy(Strategy):
+
+    stop = 0.07
+
+    def init(self):
+        self.vol_avg = self.I(
+            Volume_Avg, self.data.Volume
+        )
+
+    def next(self):
+
+        price = self.data.Close[-1]
+
+        if not self.position and self.data.Volume[-1] > 1.5 * self.vol_avg[-1]:
+            self.buy(sl=price * (1 - self.stop))
+
+        elif self.position and self.data.Volume[-1] < self.vol_avg[-1]:
+            self.position.close()
+
+
+# =====================================================
+# 4. 52-WEEK HIGH BREAKOUT BACKTESTING STRATEGY
+# =====================================================
+
+def High_52(high):
+    return pd.Series(high).rolling(252).max().shift(1)
+
+
+class High52Strategy(Strategy):
+
+    stop = 0.07
+
+    def init(self):
+        self.high52 = self.I(
+            High_52, self.data.High
+        )
+
+    def next(self):
+
+        price = self.data.Close[-1]
+
+        if not self.position and price > self.high52[-1]:
+            self.buy(sl=price * (1 - self.stop))
+
+        elif self.position and price < self.high52[-1]:
+            self.position.close()
+
+
+# =====================================================
+# 5. 52-WEEK LOW BREAKDOWN BACKTESTING STRATEGY
+# =====================================================
+
+def Low_52(low):
+    return pd.Series(low).rolling(252).min().shift(1)
+
+
+class Low52Strategy(Strategy):
+
+    stop = 0.07
+
+    def init(self):
+        self.low52 = self.I(
+            Low_52, self.data.Low
+        )
+
+    def next(self):
+
+        price = self.data.Close[-1]
+
+        if not self.position and price < self.low52[-1]:
+            self.sell(sl=price * (1 + self.stop))
+
+        elif self.position and price > self.low52[-1]:
+            self.position.close()
+
+
+# =====================================================
+# 6. COMMON BACKTESTING EXECUTION
+# =====================================================
+
+STRATEGIES = {
+    "MOVING AVERAGE": MAStrategy,
+    "MACD": MACDStrategy,
+    "VOLUME": VolumeStrategy,
+    "52-WEEK HIGH": High52Strategy,
+    "52-WEEK LOW": Low52Strategy
+}
+
+
+for strategy_name, strategy_class in STRATEGIES.items():
+
+    print("\n===================================")
+    print(strategy_name)
+    print("===================================")
+
+    for t in TICKERS:
+
+        df = yf.Ticker(f"{t}.NS").history(
+            start=START,
+            end=END,
+            auto_adjust=True
+        )
+
+        if df.empty:
+            print(f"No data for {t}")
+            continue
+
+        df.index = df.index.tz_localize(None)
+
+        bt = Backtest(
+            df,
+            strategy_class,
+            cash=CASH,
+            commission=0.0012
+        )
+
+        stats = bt.run()
+
+        print(f"\n===== {t} =====")
+
+        print(
+            f"Return {stats['Return [%]']:.1f}% | "
+            f"Buy & Hold {stats['Buy & Hold Return [%]']:.1f}% | "
+            f"Trades {stats['# Trades']} | "
+            f"Win Rate {stats['Win Rate [%]']:.1f}% | "
+            f"Max DD {stats['Max. Drawdown [%]']:.1f}%"
+        )
+
+        bt.plot(
+            resample=False,
+            superimpose=False,
+            plot_return=False,
+            plot_drawdown=False
+        )
+
+        tr = stats["_trades"]
+
+        if tr.empty:
+            print("No trades")
+            continue
+
+        table = pd.DataFrame({
+            "Entry Date": tr["EntryTime"].dt.date,
+            "Entry Price": tr["EntryPrice"].round(2),
+            "Exit Date": tr["ExitTime"].dt.date,
+            "Exit Price": tr["ExitPrice"].round(2),
+            "Shares": tr["Size"],
+            "Return %": (tr["ReturnPct"] * 100).round(2),
+            "P&L ₹": tr["PnL"].round(0),
+            "Days Held": tr["Duration"].dt.days
+        })
+
+        display(table)
+        
+# END OF BACKTESTING NOTEBOOK
